@@ -47,7 +47,37 @@ def main():
         time.sleep(2)
 
     all_df = pd.concat(frames, ignore_index=True)
+    all_df = all_df.dropna(subset=["open", "high", "low", "close"])
     all_df["date"] = pd.to_datetime(all_df["date"]).dt.tz_localize(None)
+
+    # retry tickers whose latest bar is stale/missing (partial fetch failures)
+    latest = all_df.groupby("ticker")["date"].max()
+    global_max = latest.max()
+    stale = sorted(latest[latest < global_max].index)
+    print(f"Retrying {len(stale)} tickers with stale last bar...")
+    fixed = []
+    for t in stale:
+        try:
+            time.sleep(0.5)
+            sub = yf.download(t, period="1y", interval="1d",
+                              auto_adjust=True, progress=False)
+            if sub.empty:
+                continue
+            if isinstance(sub.columns, pd.MultiIndex):
+                sub.columns = sub.columns.get_level_values(0)
+            sub = sub.reset_index()
+            sub.columns = [str(c).lower() for c in sub.columns]
+            sub["ticker"] = t
+            sub = sub[["ticker", "date", "open", "high", "low", "close", "volume"]]
+            sub = sub.dropna(subset=["open", "high", "low", "close"])
+            fixed.append(sub)
+        except Exception as e:
+            print(f"  retry {t} failed: {e}", file=sys.stderr)
+    if fixed:
+        fixed_df = pd.concat(fixed, ignore_index=True)
+        fixed_df["date"] = pd.to_datetime(fixed_df["date"]).dt.tz_localize(None)
+        all_df = all_df[~all_df.ticker.isin(fixed_df.ticker.unique())]
+        all_df = pd.concat([all_df, fixed_df], ignore_index=True)
     all_df.to_parquet(OUT / "prices.parquet", index=False)
     got = all_df["ticker"].nunique()
     print(f"Saved {got} tickers, {len(all_df)} rows -> data/prices.parquet")
